@@ -1,160 +1,200 @@
-// --- OLAR System Backend (Offline Landslide Alert and Response) ---
-// Developer: Avisha Catherine
 
-import express from 'express';
-import dotenv from 'dotenv';
 
-dotenv.config();
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const fs = require('fs');
+
 const app = express();
-app.use(express.json());
+app.use(cors());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 3000;
-
-// Store in-memory session and report data
-const sessions = {};
-const reports = [];
-
-// --- Helper function: Simulated SMS alert ---
-async function sendSmsBackup(phone, message) {
-  console.log(`SMS sent to ${phone}: ${message}`);
-  return true;
+// Twilio (SMS) setup - optional
+let twilioClient = null;
+if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  const twilio = require('twilio');
+  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 }
 
-// --- Basic status and health endpoints ---
-app.get('/status', (req, res) => {
-  res.json({ message: 'Backend is working!' });
-});
+// --- In-memory stores ---
+const sessions = new Map();
+const reports = [];
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
-});
+// --- Language strings ---
+const LANG = {
+  en: {
+    welcome: 'Landslide Safety Menu',
+    languagePrompt: 'Select language:\n1. English\n2. தமிழ் (Tamil)\n3. हिंदी (Hindi)',
+    menu: '1. Live Updates\n2. Alerts\n3. Response\n4. Help\n5. Exit',
+    liveUpdates: 'Live updates currently unavailable. Stay alert and avoid low-lying slopes.',
+    alerts: 'No new alerts right now.',
+    responsePrompt: 'Select your response:\n1. I\'m Safe\n2. Need Rescue\n3. Injured Person Nearby',
+    help: 'Safety tips:\n- Move to higher ground\n- Avoid riverbeds\n- Call local helpline if in danger',
+    thankYou: 'Response recorded. Rescue teams will be notified if needed.',
+    invalid: 'Invalid option, please try again.',
+    exit: 'Thank you. Stay safe.'
+  },
+  ta: {
+    welcome: 'மண் சிறை எச்சரிக்கை மெனு',
+    languagePrompt: 'மொழியை தேர்வு செய்க:\n1. English\n2. தமிழ் (Tamil)\n3. हिंदी (Hindi)',
+    menu: '1. நேரடி புதுப்பிப்புகள்\n2. எச்சரிக்கைகள்\n3. பதில்\n4. உதவி\n5. புறப்பட்டது',
+    liveUpdates: 'நேரடி புதுப்பிப்புகள் கிடைக்கவில்லை. எச்சரிக்கையுடன் இருங்கள்.',
+    alerts: 'புதிய எச்சரிக்கைகள் இல்லை.',
+    responsePrompt: 'உங்கள் பதிலைக் கொள்ளவும்:\n1. நான் பாதுகாப்பாக இருக்கிறேன்\n2. மீட்பு தேவை\n3. அருகில் ஒருவர் காயமடைந்தவர்',
+    help: 'பாதுகாப்பு குறிப்புகள்:\n- உயரமான திசைக்கு செல்லவும்\n- ஆற்றுக் கோரைகளை தவிர்க்கவும்\n- அவசர உதவி அழைக்கவும்',
+    thankYou: 'பதில் பதிவாக்கப்பட்டது. அச்சூழலினருக்கு அறிவிக்கப்பட்டது.',
+    invalid: 'தவறு. மீண்டும் முயற்சிக்கவும்.',
+    exit: 'நன்றி. பாதுகாப்பாக இருங்கள்.'
+  },
+  hi: {
+    welcome: 'भू-स्खलन सुरक्षा मेनू',
+    languagePrompt: 'भाषा चुनें:\n1. English\n2. தமிழ் (Tamil)\n3. हिंदी (Hindi)',
+    menu: '1. लाइव अपडेट\n2. अलर्ट\n3. प्रतिक्रिया\n4. सहायता\n5. बाहर',
+    liveUpdates: 'लाइव अद्यतन उपलब्ध नहीं हैं। सतर्क रहें।',
+    alerts: 'अभी कोई नया अलर्ट नहीं है।',
+    responsePrompt: 'अपनी प्रतिक्रिया चुनें:\n1. मैं सुरक्षित हूँ\n2. बचाव चाहिए\n3. किसी को चोट आई है',
+    help: 'सुरक्षा सुझाव:\n- ऊंची जमीन पर जाएं\n- नदियों/नालों से दूर रहें\n- आपातकालीन नंबर पर कॉल करें',
+    thankYou: 'प्रतिक्रिया दर्ज कर ली गई है।',
+    invalid: 'अमान्य विकल्प, फिर से प्रयास करें।',
+    exit: 'धन्यवाद। सुरक्षित रहें।'
+  }
+};
 
-// --- Main USSD Logic ---
-app.post('/ussd', (req, res) => {
-  const { sessionId, phoneNumber, text = '', networkCode } = req.body;
+function getLangStrings(code) {
+  return LANG[code] || LANG.en;
+}
 
-  const parts = text.split('*');
-  const step = parts.length;
+// --- Persist reports ---
+function persistReports() {
+  try {
+    fs.writeFileSync('reports.json', JSON.stringify(reports, null, 2));
+  } catch (e) {
+    console.error('Failed to persist reports:', e.message);
+  }
+}
+setInterval(persistReports, 60_000);
 
-  // Initialize a new session if not existing
-  if (!sessions[sessionId]) {
-    sessions[sessionId] = {
-      id: sessionId,
+// --- SMS helper ---
+async function sendSmsBackup(to, message) {
+  if (!twilioClient) {
+    console.log('Twilio not configured. Would send SMS to', to, 'message:', message);
+    return;
+  }
+  try {
+    const from = process.env.TWILIO_FROM;
+    await twilioClient.messages.create({ body: message, from, to });
+    console.log('SMS sent to', to);
+  } catch (e) {
+    console.error('Failed to send SMS:', e.message);
+  }
+}
+
+// --- USSD webhook ---
+app.post('/ussd', async (req, res) => {
+  const { sessionId, phoneNumber, text = '', networkCode, cellTower, lat, lng } = req.body;
+  if (!sessionId || !phoneNumber) return res.status(400).send('missing params');
+
+  let session = sessions.get(sessionId);
+  if (!session) {
+    session = { id: sessionId, phone: phoneNumber, lang: 'en', step: 'lang', lastActivity: Date.now(), meta: { networkCode, cellTower, lat, lng } };
+    sessions.set(sessionId, session);
+  }
+  session.lastActivity = Date.now();
+
+  const tokens = text.split('*').filter(Boolean);
+  const last = tokens.length ? tokens[tokens.length - 1] : '';
+  const langStr = getLangStrings(session.lang);
+
+  if (session.step === 'lang') {
+    if (!last) return sendUssdResponse(res, langStr.languagePrompt, false);
+    if (last === '1') session.lang = 'en';
+    else if (last === '2') session.lang = 'ta';
+    else if (last === '3') session.lang = 'hi';
+    else return sendUssdResponse(res, langStr.invalid, true);
+
+    session.step = 'menu';
+    const s = getLangStrings(session.lang);
+    return sendUssdResponse(res, `${s.welcome}\n${s.menu}`, false);
+  }
+
+  if (session.step === 'menu') {
+    if (!last) return sendUssdResponse(res, langStr.invalid, true);
+    const s = getLangStrings(session.lang);
+    switch (last) {
+      case '1': return sendUssdResponse(res, s.liveUpdates, true);
+      case '2': sendSmsBackup(phoneNumber, `[ALARMS] ${s.alerts}`); return sendUssdResponse(res, s.alerts, true);
+      case '3': session.step = 'response'; return sendUssdResponse(res, s.responsePrompt, false);
+      case '4': return sendUssdResponse(res, s.help, true);
+      case '5': sessions.delete(sessionId); return sendUssdResponse(res, langStr.exit, true);
+      default: return sendUssdResponse(res, s.invalid, true);
+    }
+  }
+
+  if (session.step === 'response') {
+    const s = getLangStrings(session.lang);
+    if (!['1','2','3'].includes(last)) return sendUssdResponse(res, s.invalid, false);
+
+    const type = last === '1' ? 'safe' : last === '2' ? 'need_rescue' : 'injured_nearby';
+    const report = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       phone: phoneNumber,
-      lang: 'en', // default English
-      step: 'language'
+      type,
+      lang: session.lang,
+      timestamp: new Date().toISOString(),
+      location: { lat: lat||null, lng: lng||null, cellTower, networkCode }
     };
+    reports.push(report);
+    persistReports();
+    console.log('New report:', report);
+
+    if (process.env.ADMIN_PHONE) {
+      const adminMsg = `Report: ${type} from ${phoneNumber} at ${report.location.lat || report.location.cellTower || 'unknown'}`;
+      sendSmsBackup(process.env.ADMIN_PHONE, adminMsg);
+    }
+    if (type !== 'safe') {
+      const userMsg = getLangStrings(session.lang).thankYou + ' — Rescue teams notified.';
+      sendSmsBackup(phoneNumber, userMsg);
+    }
+
+    sessions.delete(sessionId);
+    return sendUssdResponse(res, s.thankYou, true);
   }
 
-  const session = sessions[sessionId];
-  let message = '';
-  let endSession = false;
-
-  // Step 1: Language selection
-  if (step === 1 && text === '') {
-    message = 'Select language:\n1. English\n2. தமிழ் (Tamil)\n3. हिंदी (Hindi)';
-    session.step = 'language';
-  }
-  else if (session.step === 'language') {
-    switch (text.trim()) {
-      case '1':
-        session.lang = 'en';
-        message = 'Landslide Safety Menu\n1. Live Updates\n2. Alerts\n3. Response\n4. Help\n5. Exit';
-        session.step = 'menu';
-        break;
-      case '2':
-        session.lang = 'ta';
-        message = 'மலை சரிவு பாதுகாப்பு மெனு\n1. நேரடி புதுப்பிப்புகள்\n2. எச்சரிக்கைகள்\n3. பதில்\n4. உதவி\n5. வெளியேறு';
-        session.step = 'menu';
-        break;
-      case '3':
-        session.lang = 'hi';
-        message = 'भूस्खलन सुरक्षा मेनू\n1. लाइव अपडेट्स\n2. अलर्ट्स\n3. प्रतिक्रिया\n4. सहायता\n5. बाहर निकलें';
-        session.step = 'menu';
-        break;
-      default:
-        message = 'Invalid choice. Please try again.\n1. English\n2. தமிழ்\n3. हिंदी';
-        session.step = 'language';
-    }
-  }
-
-  // Step 2: Menu options
-  else if (session.step === 'menu') {
-    const lang = session.lang;
-    const option = parts[parts.length - 1];
-
-    if (option === '1') {
-      message = (lang === 'ta') ? 'நேரடி மலை சரிவு தகவல்கள்...' :
-                (lang === 'hi') ? 'लाइव भूस्खलन जानकारी...' :
-                'Live landslide updates...';
-      endSession = false;
-    }
-    else if (option === '2') {
-      message = (lang === 'ta') ? 'எச்சரிக்கைகள் தற்போது எதுவும் இல்லை.' :
-                (lang === 'hi') ? 'कोई अलर्ट उपलब्ध नहीं हैं।' :
-                'No alerts currently.';
-      endSession = false;
-    }
-    else if (option === '3') {
-      message = (lang === 'ta') ? 'உங்கள் பதிலைத் தேர்ந்தெடுக்கவும்:\n1. நான் பாதுகாப்பாக இருக்கிறேன்\n2. மீட்பு தேவை\n3. காயமடைந்தவர் அருகில் உள்ளார்' :
-                (lang === 'hi') ? 'अपना उत्तर चुनें:\n1. मैं सुरक्षित हूं\n2. बचाव की आवश्यकता\n3. पास घायल व्यक्ति है' :
-                'Select your response:\n1. I\'m Safe\n2. Need Rescue\n3. Injured Person Nearby';
-      session.step = 'response';
-    }
-    else if (option === '4') {
-      message = (lang === 'ta') ? 'மலை சரிவு நேரத்தில் தாழ்ந்த பகுதிகளை விட்டு விலகி இருங்கள்.' :
-                (lang === 'hi') ? 'भूस्खलन के दौरान निचले क्षेत्रों से दूर रहें।' :
-                'During a landslide, stay away from low areas.';
-      endSession = false;
-    }
-    else if (option === '5') {
-      message = (lang === 'ta') ? 'பாதுகாப்பாக இருங்கள். வணக்கம்!' :
-                (lang === 'hi') ? 'सुरक्षित रहें। अलविदा!' :
-                'Stay safe. Goodbye!';
-      endSession = true;
-    }
-    else {
-      message = (lang === 'ta') ? 'தவறான தேர்வு. மீண்டும் முயற்சிக்கவும்.' :
-                (lang === 'hi') ? 'अमान्य विकल्प। कृपया पुनः प्रयास करें।' :
-                'Invalid option. Please try again.';
-    }
-  }
-
-  // Step 3: Response collection
-  else if (session.step === 'response') {
-    const resp = parts[parts.length - 1];
-    reports.push({ phone: session.phone, response: resp, lang: session.lang, time: new Date().toISOString() });
-    message = (session.lang === 'ta') ? 'உங்கள் பதில் பதிவு செய்யப்பட்டது. நன்றி!' :
-              (session.lang === 'hi') ? 'आपकी प्रतिक्रिया दर्ज कर ली गई है। धन्यवाद!' :
-              'Your response has been recorded. Thank you!';
-    endSession = true;
-    session.step = 'done';
-  }
-
-  return res.json({ message, endSession });
+  return sendUssdResponse(res, langStr.invalid, true);
 });
+
+function sendUssdResponse(res, message, endSession) {
+  const payload = { message, endSession };
+  res.set('Content-Type', 'application/json');
+  return res.send(payload);
+}
 
 // --- Alerts endpoint ---
 app.post('/alert', async (req, res) => {
-  const { level = 'info', message = '', area = '' } = req.body;
+  const { level='info', message='', area='' } = req.body;
   console.log('ALERT triggered:', level, message, area);
-  if (process.env.ADMIN_PHONE) {
-    await sendSmsBackup(process.env.ADMIN_PHONE, `ALERT[${level}]: ${message} (${area})`);
-  }
+  if (process.env.ADMIN_PHONE) await sendSmsBackup(process.env.ADMIN_PHONE, `ALERT[${level}]: ${message} (${area})`);
   return res.json({ ok: true });
 });
 
-// --- Dashboard endpoints ---
+// --- Dashboard ---
 app.get('/responses', (req, res) => {
   const last = reports.slice(-200).reverse();
-  res.json({ count: reports.length, reports: last });
+  return res.json({ count: reports.length, reports: last });
 });
 
 app.get('/sessions', (req, res) => {
-  res.json({ sessions: Object.values(sessions) });
+  const arr = [];
+  sessions.forEach((v, k) => arr.push({ id: k, phone: v.phone, step: v.step, lang: v.lang }));
+  return res.json({ sessions: arr });
 });
 
+// --- Health & Status ---
+app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/status', (req, res) => res.json({ message: "Backend is working!" }));
+
 // --- Start server ---
-app.listen(PORT, () => {
-  console.log(`OLAR USSD backend listening at http://127.0.0.1:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '127.0.0.1', () => console.log(`OLAR USSD backend listening at http://127.0.0.1:${PORT}`));
