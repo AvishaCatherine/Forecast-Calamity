@@ -1,0 +1,161 @@
+// --- OLAR System Backend (Offline Landslide Alert and Response) ---
+// Developer: Avisha Catherine
+
+import express from 'express';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+// Store in-memory session and report data
+const sessions = {};
+const reports = [];
+
+// --- Helper function: Simulated SMS alert ---
+async function sendSmsBackup(phone, message) {
+  console.log(`SMS sent to ${phone}: ${message}`);
+  return true;
+}
+
+// --- Basic status and health endpoints ---
+app.get('/status', (req, res) => {
+  res.json({ message: 'Backend is working!' });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// --- Main USSD Logic ---
+app.post('/ussd', (req, res) => {
+  const { sessionId, phoneNumber, text = '', networkCode } = req.body;
+
+  const parts = text.split('*');
+  const step = parts.length;
+
+  // Initialize a new session if not existing
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = {
+      id: sessionId,
+      phone: phoneNumber,
+      lang: 'en', // default English
+      step: 'language'
+    };
+  }
+
+  const session = sessions[sessionId];
+  let message = '';
+  let endSession = false;
+
+  // Step 1: Language selection
+  if (step === 1 && text === '') {
+    message = 'Select language:\n1. English\n2. தமிழ் (Tamil)\n3. हिंदी (Hindi)';
+    session.step = 'language';
+  }
+  else if (session.step === 'language') {
+    switch (text.trim()) {
+      case '1':
+        session.lang = 'en';
+        message = 'Landslide Safety Menu\n1. Live Updates\n2. Alerts\n3. Response\n4. Help\n5. Exit';
+        session.step = 'menu';
+        break;
+      case '2':
+        session.lang = 'ta';
+        message = 'மலை சரிவு பாதுகாப்பு மெனு\n1. நேரடி புதுப்பிப்புகள்\n2. எச்சரிக்கைகள்\n3. பதில்\n4. உதவி\n5. வெளியேறு';
+        session.step = 'menu';
+        break;
+      case '3':
+        session.lang = 'hi';
+        message = 'भूस्खलन सुरक्षा मेनू\n1. लाइव अपडेट्स\n2. अलर्ट्स\n3. प्रतिक्रिया\n4. सहायता\n5. बाहर निकलें';
+        session.step = 'menu';
+        break;
+      default:
+        message = 'Invalid choice. Please try again.\n1. English\n2. தமிழ்\n3. हिंदी';
+        session.step = 'language';
+    }
+  }
+
+  // Step 2: Menu options
+  else if (session.step === 'menu') {
+    const lang = session.lang;
+    const option = parts[parts.length - 1];
+
+    if (option === '1') {
+      message = (lang === 'ta') ? 'நேரடி மலை சரிவு தகவல்கள்...' :
+                (lang === 'hi') ? 'लाइव भूस्खलन जानकारी...' :
+                'Live landslide updates...';
+      endSession = false;
+    }
+    else if (option === '2') {
+      message = (lang === 'ta') ? 'எச்சரிக்கைகள் தற்போது எதுவும் இல்லை.' :
+                (lang === 'hi') ? 'कोई अलर्ट उपलब्ध नहीं हैं।' :
+                'No alerts currently.';
+      endSession = false;
+    }
+    else if (option === '3') {
+      message = (lang === 'ta') ? 'உங்கள் பதிலைத் தேர்ந்தெடுக்கவும்:\n1. நான் பாதுகாப்பாக இருக்கிறேன்\n2. மீட்பு தேவை\n3. காயமடைந்தவர் அருகில் உள்ளார்' :
+                (lang === 'hi') ? 'अपना उत्तर चुनें:\n1. मैं सुरक्षित हूं\n2. बचाव की आवश्यकता\n3. पास घायल व्यक्ति है' :
+                'Select your response:\n1. I\'m Safe\n2. Need Rescue\n3. Injured Person Nearby';
+      session.step = 'response';
+    }
+    else if (option === '4') {
+      message = (lang === 'ta') ? 'மலை சரிவு நேரத்தில் தாழ்ந்த பகுதிகளை விட்டு விலகி இருங்கள்.' :
+                (lang === 'hi') ? 'भूस्खलन के दौरान निचले क्षेत्रों से दूर रहें।' :
+                'During a landslide, stay away from low areas.';
+      endSession = false;
+    }
+    else if (option === '5') {
+      message = (lang === 'ta') ? 'பாதுகாப்பாக இருங்கள். வணக்கம்!' :
+                (lang === 'hi') ? 'सुरक्षित रहें। अलविदा!' :
+                'Stay safe. Goodbye!';
+      endSession = true;
+    }
+    else {
+      message = (lang === 'ta') ? 'தவறான தேர்வு. மீண்டும் முயற்சிக்கவும்.' :
+                (lang === 'hi') ? 'अमान्य विकल्प। कृपया पुनः प्रयास करें।' :
+                'Invalid option. Please try again.';
+    }
+  }
+
+  // Step 3: Response collection
+  else if (session.step === 'response') {
+    const resp = parts[parts.length - 1];
+    reports.push({ phone: session.phone, response: resp, lang: session.lang, time: new Date().toISOString() });
+    message = (session.lang === 'ta') ? 'உங்கள் பதில் பதிவு செய்யப்பட்டது. நன்றி!' :
+              (session.lang === 'hi') ? 'आपकी प्रतिक्रिया दर्ज कर ली गई है। धन्यवाद!' :
+              'Your response has been recorded. Thank you!';
+    endSession = true;
+    session.step = 'done';
+  }
+
+  return res.json({ message, endSession });
+});
+
+// --- Alerts endpoint ---
+app.post('/alert', async (req, res) => {
+  const { level = 'info', message = '', area = '' } = req.body;
+  console.log('ALERT triggered:', level, message, area);
+  if (process.env.ADMIN_PHONE) {
+    await sendSmsBackup(process.env.ADMIN_PHONE, `ALERT[${level}]: ${message} (${area})`);
+  }
+  return res.json({ ok: true });
+});
+
+// --- Dashboard endpoints ---
+app.get('/responses', (req, res) => {
+  const last = reports.slice(-200).reverse();
+  res.json({ count: reports.length, reports: last });
+});
+
+app.get('/sessions', (req, res) => {
+  res.json({ sessions: Object.values(sessions) });
+});
+
+// --- Start server ---
+app.listen(PORT, () => {
+  console.log(`OLAR USSD backend listening at http://127.0.0.1:${PORT}`);
+});
