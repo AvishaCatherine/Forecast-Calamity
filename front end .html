@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OLAR System Test Frontend</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; }
+input, select, button { margin: 5px 0; padding: 5px; }
+textarea { width: 100%; height: 60px; margin: 5px 0; }
+</style>
+</head>
+<body>
+<h2>OLAR System Frontend</h2>
+
+<h3>Simulate USSD</h3>
+<form id="ussdForm">
+<label>Session ID:</label><br>
+<input type="text" id="sessionId" value="s1"><br>
+<label>Phone Number:</label><br>
+<input type="text" id="phoneNumber" value="+919876543210"><br>
+<label>Text Input:</label><br>
+<input type="text" id="textInput" value=""><br>
+<label>Network Code:</label><br>
+<input type="text" id="networkCode" value="N1"><br>
+<button type="submit">Send USSD</button>
+</form>
+<pre id="ussdResult"></pre>
+
+<h3>View Reports</h3>
+<button onclick="getReports()">Refresh Reports</button>
+<pre id="reportsResult"></pre>
+
+<h3>Trigger Alert</h3>
+<form id="alertForm">
+<label>Level:</label>
+<input type="text" id="alertLevel" value="high"><br>
+<label>Message:</label>
+<input type="text" id="alertMessage" value="Heavy rain"><br>
+<label>Area:</label>
+<input type="text" id="alertArea" value="VillageA"><br>
+<button type="submit">Send Alert</button>
+</form>
+<pre id="alertResult"></pre>
+
+<script>
+const backend = "http://127.0.0.1:3000";
+
+document.getElementById("ussdForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const sessionId = document.getElementById("sessionId").value;
+  const phoneNumber = document.getElementById("phoneNumber").value;
+  const text = document.getElementById("textInput").value;
+  const networkCode = document.getElementById("networkCode").value;
+
+  const res = await fetch(`${backend}/ussd`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, phoneNumber, text, networkCode })
+  });
+  const data = await res.json();
+  document.getElementById("ussdResult").textContent = JSON.stringify(data, null, 2);
+});
+
+async function getReports() {
+  const res = await fetch(`${backend}/responses`);
+  const data = await res.json();
+  document.getElementById("reportsResult").textContent = JSON.stringify(data, null, 2);
+}
+
+document.getElementById("alertForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const level = document.getElementById("alertLevel").value;
+  const message = document.getElementById("alertMessage").value;
+  const area = document.getElementById("alertArea").value;
+
+  const res = await fetch(`${backend}/alert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ level, message, area })
+  });
+  const data = await res.json();
+  document.getElementById("alertResult").textContent = JSON.stringify(data, null, 2);
+});
+</script>
+</body>
+</html>
